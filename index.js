@@ -68,7 +68,7 @@ const ALLOWED_VIEWS = new Set([
   "hardware",
   "handle_base",
   "stitching",
-  "serial" // Step 2 uses this
+  "serial"
 ]);
 
 const VIEW_KEYWORDS = [
@@ -132,7 +132,6 @@ function isLikelySerialView(view) {
 function assessSerialImage(file) {
   if (!file) return { present: false, clear: false };
 
-  // Very small images are usually unreadable serials
   if (file.size < 80_000) {
     return { present: true, clear: false };
   }
@@ -141,145 +140,9 @@ function assessSerialImage(file) {
 }
 
 // =======================
-// Core verdict engine
+// STEP 3: BRAND INFERENCE
 // =======================
-function buildCoreVerdict(files, labels = {}) {
-  const missing_photos = [];
-  const red_flags = [];
-  const reasons = [];
-  const views = new Set();
+function inferBrandFromFilename(filename = "") {
+  const n = filename.toLowerCase();
 
-  let serialObserved = false;
-  let serialClear = false;
-
-  for (const f of files) {
-    if (f.size < 60_000) {
-      red_flags.push(`Low-quality image: ${f.originalname}`);
-      continue;
-    }
-
-    const labeledView = labels[f.originalname];
-    const view = labeledView || classifyView(f.originalname);
-
-    if (view) {
-      views.add(view);
-
-      // -------- SERIAL VISIBILITY CHECK --------
-      if (isLikelySerialView(view)) {
-        const assessment = assessSerialImage(f);
-
-        serialObserved = serialObserved || assessment.present;
-        serialClear = serialClear || assessment.clear;
-
-        if (assessment.present && !assessment.clear) {
-          red_flags.push(
-            `Serial/date code image present but unclear: ${f.originalname}`
-          );
-        }
-      }
-    }
-  }
-
-  // Required view gating
-  for (const req of REQUIRED_VIEWS) {
-    if (!views.has(req)) missing_photos.push(req);
-  }
-
-  // -------- SERIAL LANGUAGE (INFO ONLY) --------
-  if (serialObserved && serialClear) {
-    reasons.push("Serial/date code observed and appears readable");
-  } else if (serialObserved && !serialClear) {
-    reasons.push("Serial/date code observed but could not be clearly verified");
-  } else {
-    reasons.push("No serial/date code observed in provided images");
-  }
-
-  // Verdict logic
-  if (missing_photos.length > 0) {
-    return {
-      verdict: "Inconclusive",
-      confidence: 30,
-      reasons: ["Missing or unclear required views", ...reasons],
-      missing_photos,
-      red_flags
-    };
-  }
-
-  if (red_flags.length >= 3) {
-    return {
-      verdict: "Likely Not Authentic",
-      confidence: 65,
-      reasons: ["Multiple technical inconsistencies detected", ...reasons],
-      missing_photos: [],
-      red_flags
-    };
-  }
-
-  return {
-    verdict: "Likely Authentic",
-    confidence: 75,
-    reasons: ["All required views present; no universal red flags", ...reasons],
-    missing_photos: [],
-    red_flags
-  };
-}
-
-// =======================
-// VERIFY ROUTE
-// =======================
-app.post("/verify", upload.array("images", 10), async (req, res) => {
-  try {
-    if (!req.files || req.files.length === 0) {
-      return res.json({
-        verdict: "Inconclusive",
-        confidence: 0,
-        reasons: ["No images received"],
-        missing_photos: REQUIRED_VIEWS,
-        red_flags: []
-      });
-    }
-
-    const labels = parseLabels(req);
-    const result = buildCoreVerdict(req.files, labels);
-    return res.json(result);
-
-  } catch {
-    return res.json({
-      verdict: "Inconclusive",
-      confidence: 0,
-      reasons: ["Server error during verification"],
-      missing_photos: [],
-      red_flags: []
-    });
-  }
-});
-
-// =======================
-// Error handler
-// =======================
-app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    return res.json({
-      verdict: "Inconclusive",
-      confidence: 0,
-      reasons: [err.message],
-      missing_photos: [],
-      red_flags: []
-    });
-  }
-
-  return res.json({
-    verdict: "Inconclusive",
-    confidence: 0,
-    reasons: ["Invalid request"],
-    missing_photos: [],
-    red_flags: []
-  });
-});
-
-// =======================
-// Start server
-// =======================
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+  if (n.includes("lv") || n.includes("louis")) return "louis_vuitton";
