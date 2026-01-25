@@ -1,38 +1,47 @@
 import express from "express";
+import multer from "multer";
+import cors from "cors";
 
 const app = express();
-app.use(express.json({ limit: "20mb" }));
+const port = process.env.PORT || 3000;
 
-app.get("/", (req, res) => {
-  res.send("The Real Carry Verification API is running");
+/* allow WordPress */
+app.use(cors());
+app.use(express.json());
+
+/* multer setup (memory, multiple files) */
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB per file
+    files: 10,                 // max 10 images
+  },
 });
 
-app.post("/authenticate", (req, res) => {
-  return res.json({
-    verdict: "Likely Authentic",
-    confidence: 88,
-    reasons: [
-      "Brand identifiers visually consistent",
-      "Construction and materials align with brand standards"
-    ],
-    missing_photos: [],
-    red_flags: [],
-    certificate: {
-      certificate_id: "TRC-TEST-001",
-      brand: "Test Brand",
-      item_name: "Test Bag",
-      decision_date: new Date().toISOString(),
-      issuer: "The Real Carry",
-      public_status: "Verified Authentic",
-      certificate_title: "Verified Authentic",
-      certificate_statement:
-        "This item has been verified authentic based on observable brand identifiers.",
-      certificate_eligible: true
-    }
+/* health check */
+app.get("/", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+/* MULTI-IMAGE UPLOAD ENDPOINT */
+app.post("/verify", upload.array("images", 10), (req, res) => {
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: "No files received" });
+  }
+
+  const files = req.files.map((f) => ({
+    name: f.originalname,
+    type: f.mimetype,
+    size: f.size,
+  }));
+
+  res.json({
+    success: true,
+    count: files.length,
+    files,
   });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`API listening on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`API running on port ${port}`);
 });
