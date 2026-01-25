@@ -6,7 +6,7 @@ import multer from "multer";
 import cors from "cors";
 
 // =======================
-// App init
+// App initialization
 // =======================
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,7 +15,7 @@ app.use(cors());
 app.use(express.json());
 
 // =======================
-// Multer config
+// Multer configuration
 // =======================
 const storage = multer.memoryStorage();
 
@@ -68,7 +68,7 @@ const ALLOWED_VIEWS = new Set([
   "hardware",
   "handle_base",
   "stitching",
-  "serial" // reserved for Step 2
+  "serial" // Step 2 uses this
 ]);
 
 const VIEW_KEYWORDS = [
@@ -78,7 +78,7 @@ const VIEW_KEYWORDS = [
   { view: "bottom", keywords: ["bottom", "base"] },
   { view: "top", keywords: ["top"] },
   { view: "interior", keywords: ["interior", "inside", "lining"] },
-  { view: "logo_stamp", keywords: ["stamp", "logo", "heat", "serial", "tag", "label"] },
+  { view: "logo_stamp", keywords: ["stamp", "logo", "heat", "tag", "label"] },
   { view: "hardware", keywords: ["zip", "zipper", "pull", "lock", "clasp", "hardware"] },
   { view: "handle_base", keywords: ["handle", "strap", "base"] },
   { view: "stitching", keywords: ["stitch", "seam"] }
@@ -122,11 +122,35 @@ function parseLabels(req) {
   }
 }
 
+// =======================
+// STEP 2: SERIAL HELPERS
+// =======================
+function isLikelySerialView(view) {
+  return view === "serial" || view === "logo_stamp";
+}
+
+function assessSerialImage(file) {
+  if (!file) return { present: false, clear: false };
+
+  // Very small images are usually unreadable serials
+  if (file.size < 80_000) {
+    return { present: true, clear: false };
+  }
+
+  return { present: true, clear: true };
+}
+
+// =======================
+// Core verdict engine
+// =======================
 function buildCoreVerdict(files, labels = {}) {
   const missing_photos = [];
   const red_flags = [];
   const reasons = [];
   const views = new Set();
+
+  let serialObserved = false;
+  let serialClear = false;
 
   for (const f of files) {
     if (f.size < 60_000) {
@@ -137,18 +161,45 @@ function buildCoreVerdict(files, labels = {}) {
     const labeledView = labels[f.originalname];
     const view = labeledView || classifyView(f.originalname);
 
-    if (view) views.add(view);
+    if (view) {
+      views.add(view);
+
+      // -------- SERIAL VISIBILITY CHECK --------
+      if (isLikelySerialView(view)) {
+        const assessment = assessSerialImage(f);
+
+        serialObserved = serialObserved || assessment.present;
+        serialClear = serialClear || assessment.clear;
+
+        if (assessment.present && !assessment.clear) {
+          red_flags.push(
+            `Serial/date code image present but unclear: ${f.originalname}`
+          );
+        }
+      }
+    }
   }
 
+  // Required view gating
   for (const req of REQUIRED_VIEWS) {
     if (!views.has(req)) missing_photos.push(req);
   }
 
+  // -------- SERIAL LANGUAGE (INFO ONLY) --------
+  if (serialObserved && serialClear) {
+    reasons.push("Serial/date code observed and appears readable");
+  } else if (serialObserved && !serialClear) {
+    reasons.push("Serial/date code observed but could not be clearly verified");
+  } else {
+    reasons.push("No serial/date code observed in provided images");
+  }
+
+  // Verdict logic
   if (missing_photos.length > 0) {
     return {
       verdict: "Inconclusive",
       confidence: 30,
-      reasons: ["Missing or unclear required views"],
+      reasons: ["Missing or unclear required views", ...reasons],
       missing_photos,
       red_flags
     };
@@ -158,7 +209,7 @@ function buildCoreVerdict(files, labels = {}) {
     return {
       verdict: "Likely Not Authentic",
       confidence: 65,
-      reasons: ["Multiple technical inconsistencies detected"],
+      reasons: ["Multiple technical inconsistencies detected", ...reasons],
       missing_photos: [],
       red_flags
     };
@@ -167,7 +218,7 @@ function buildCoreVerdict(files, labels = {}) {
   return {
     verdict: "Likely Authentic",
     confidence: 75,
-    reasons: ["All required views present; no universal red flags"],
+    reasons: ["All required views present; no universal red flags", ...reasons],
     missing_photos: [],
     red_flags
   };
