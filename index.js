@@ -1,42 +1,96 @@
 import express from "express";
 import multer from "multer";
+import cors from "cors";
 
 const app = express();
-const port = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;
 
-// Multer config (memory, multiple files)
+/* -------------------- Middleware -------------------- */
+app.use(cors());
+app.use(express.json());
+
+/* -------------------- Multer Config -------------------- */
+const storage = multer.memoryStorage();
+
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage,
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB per file
+    files: 10,              // max 10 images
+    fileSize: 10 * 1024 * 1024 // 10 MB total (Render-safe)
+  },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith("image/")) {
+      cb(new Error("Only image files allowed"), false);
+    } else {
+      cb(null, true);
+    }
   }
 });
 
-// Health check
+/* -------------------- Health Check -------------------- */
 app.get("/", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// MULTI-IMAGE ENDPOINT
+/* -------------------- VERIFY ENDPOINT -------------------- */
 app.post("/verify", upload.array("images", 10), async (req, res) => {
-  if (!req.files || req.files.length === 0) {
-    return res.status(400).json({ error: "No images received" });
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.json({
+        verdict: "Inconclusive",
+        confidence: 0,
+        reasons: ["No images received"],
+        missing_photos: ["front","back","side","bottom","top","interior","heat_stamp","zipper_pull","handle_base","stitching"],
+        red_flags: []
+      });
+    }
+
+    /* --------------------------------------------------
+       PLACEHOLDER AUTH LOGIC
+       (This is where LV rules will go)
+       -------------------------------------------------- */
+
+    return res.json({
+      verdict: "Inconclusive",
+      confidence: 30,
+      reasons: ["Authentication logic pending"],
+      missing_photos: [],
+      red_flags: []
+    });
+
+  } catch (err) {
+    return res.json({
+      verdict: "Inconclusive",
+      confidence: 0,
+      reasons: ["Server error during verification"],
+      missing_photos: [],
+      red_flags: []
+    });
+  }
+});
+
+/* -------------------- Error Handler -------------------- */
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.json({
+      verdict: "Inconclusive",
+      confidence: 0,
+      reasons: [err.message],
+      missing_photos: [],
+      red_flags: []
+    });
   }
 
-  // Basic confirmation (we’ll add AI later)
-  const files = req.files.map(f => ({
-    name: f.originalname,
-    size: f.size,
-    type: f.mimetype
-  }));
-
-  res.json({
-    success: true,
-    count: files.length,
-    files
+  return res.json({
+    verdict: "Inconclusive",
+    confidence: 0,
+    reasons: ["Invalid request"],
+    missing_photos: [],
+    red_flags: []
   });
 });
 
-app.listen(port, () => {
-  console.log(`API running on port ${port}`);
+/* -------------------- Start Server -------------------- */
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
