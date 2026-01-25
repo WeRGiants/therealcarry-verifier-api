@@ -4,6 +4,7 @@
 import express from "express";
 import multer from "multer";
 import cors from "cors";
+import OpenAI from "openai";
 
 // =======================
 // App initialization
@@ -13,6 +14,13 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// =======================
+// OpenAI client
+// =======================
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 // =======================
 // Multer configuration
@@ -79,7 +87,7 @@ const VIEW_KEYWORDS = [
   { view: "top", keywords: ["top"] },
   { view: "interior", keywords: ["interior", "inside", "lining"] },
   { view: "logo_stamp", keywords: ["stamp", "logo", "heat", "tag", "label"] },
-  { view: "hardware", keywords: ["zip", "zipper", "pull", "lock", "clasp", "hardware"] },
+  { view: "hardware", keywords: ["zip", "zipper", "pull", "lock", "clasp"] },
   { view: "handle_base", keywords: ["handle", "strap", "base"] },
   { view: "stitching", keywords: ["stitch", "seam"] }
 ];
@@ -101,7 +109,6 @@ function classifyView(filename) {
 
 function parseLabels(req) {
   if (!req.body || !req.body.labels) return {};
-
   try {
     const parsed =
       typeof req.body.labels === "string"
@@ -112,9 +119,7 @@ function parseLabels(req) {
 
     const clean = {};
     for (const [filename, view] of Object.entries(parsed)) {
-      if (ALLOWED_VIEWS.has(view)) {
-        clean[filename] = view;
-      }
+      if (ALLOWED_VIEWS.has(view)) clean[filename] = view;
     }
     return clean;
   } catch {
@@ -123,7 +128,7 @@ function parseLabels(req) {
 }
 
 // =======================
-// STEP 2: SERIAL HELPERS
+// STEP 2: SERIAL VISIBILITY
 // =======================
 function isLikelySerialView(view) {
   return view === "serial" || view === "logo_stamp";
@@ -131,69 +136,95 @@ function isLikelySerialView(view) {
 
 function assessSerialImage(file) {
   if (!file) return { present: false, clear: false };
-
-  if (file.size < 80_000) {
-    return { present: true, clear: false };
-  }
-
+  if (file.size < 80_000) return { present: true, clear: false };
   return { present: true, clear: true };
 }
 
 // =======================
 // STEP 3: BRAND INFERENCE
 // =======================
-function inferBrandFromFilename(filename = "") {
-  const n = filename.toLowerCase();
-
+function inferBrandFromFilename(name = "") {
+  const n = name.toLowerCase();
   if (n.includes("lv") || n.includes("louis")) return "louis_vuitton";
   if (n.includes("gucci")) return "gucci";
   if (n.includes("chanel")) return "chanel";
   if (n.includes("prada")) return "prada";
-
   return null;
 }
 
 function inferBrand(files) {
   const hits = {};
-
   for (const f of files) {
     const b = inferBrandFromFilename(f.originalname);
     if (b) hits[b] = (hits[b] || 0) + 1;
   }
-
   const entries = Object.entries(hits);
-  if (entries.length === 0) return null;
-
+  if (!entries.length) return null;
   entries.sort((a, b) => b[1] - a[1]);
-
   return entries[0][1] >= 2 ? entries[0][0] : null;
 }
 
 // =======================
 // STEP 3: SERIAL FORMAT RULES
 // =======================
-function checkLVSerialFormat(serialText = "") {
-  const cleaned = serialText.replace(/\s+/g, "").toUpperCase();
-
-  if (!/^[A-Z0-9]{4,6}$/.test(cleaned)) {
+function checkLVSerialFormat(text = "") {
+  if (!/^[A-Z0-9]{4,6}$/.test(text)) {
     return "LV serial format inconsistent with known date code structures";
   }
   return null;
 }
 
-function checkGucciSerialFormat(serialText = "") {
-  const cleaned = serialText.replace(/\s+/g, "");
-
-  if (!/^\d{8,14}$/.test(cleaned)) {
+function checkGucciSerialFormat(text = "") {
+  if (!/^\d{8,14}$/.test(text)) {
     return "Gucci serial format inconsistent with typical numeric patterns";
   }
   return null;
 }
 
 // =======================
+// STEP 4: OCR (OPENAI)
+// =======================
+async function extractSerialTextFromImage(buffer) {
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "Extract serial or date code text from handbag images. " +
+            "Return ONLY the text you see."
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Extract any serial or date code text visible." },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${buffer.toString("base64")}`
+              }
+            }
+          ]
+        }
+      ],
+      max_tokens: 50
+    });
+
+    return response.choices[0]?.message?.content?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSerialText(text = "") {
+  return text.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+}
+
+// =======================
 // Core verdict engine
 // =======================
-function buildCoreVerdict(files, labels = {}) {
+async function buildCoreVerdict(files, labels = {}) {
   const missing_photos = [];
   const red_flags = [];
   const reasons = [];
@@ -201,6 +232,8 @@ function buildCoreVerdict(files, labels = {}) {
 
   let serialObserved = false;
   let serialClear = false;
+  let extractedSerial = null;
+  let normalizedSerial = null;
 
   const inferredBrand = inferBrand(files);
 
@@ -210,21 +243,21 @@ function buildCoreVerdict(files, labels = {}) {
       continue;
     }
 
-    const labeledView = labels[f.originalname];
-    const view = labeledView || classifyView(f.originalname);
+    const view = labels[f.originalname] || classifyView(f.originalname);
+    if (!view) continue;
 
-    if (view) {
-      views.add(view);
+    views.add(view);
 
-      if (isLikelySerialView(view)) {
-        const assessment = assessSerialImage(f);
-        serialObserved ||= assessment.present;
-        serialClear ||= assessment.clear;
+    if (isLikelySerialView(view)) {
+      const assessment = assessSerialImage(f);
+      serialObserved ||= assessment.present;
+      serialClear ||= assessment.clear;
 
-        if (assessment.present && !assessment.clear) {
-          red_flags.push(
-            `Serial/date code image present but unclear: ${f.originalname}`
-          );
+      if (assessment.clear && !extractedSerial) {
+        const raw = await extractSerialTextFromImage(f.buffer);
+        if (raw) {
+          extractedSerial = raw;
+          normalizedSerial = normalizeSerialText(raw);
         }
       }
     }
@@ -234,38 +267,36 @@ function buildCoreVerdict(files, labels = {}) {
     if (!views.has(req)) missing_photos.push(req);
   }
 
-  // -------- SERIAL INFO (STEP 2) --------
-  if (serialObserved && serialClear) {
-    reasons.push("Serial/date code observed and appears readable");
-  } else if (serialObserved && !serialClear) {
-    reasons.push("Serial/date code observed but could not be clearly verified");
+  if (normalizedSerial) {
+    reasons.push("Serial/date code text extracted from image");
+  } else if (serialObserved) {
+    reasons.push("Serial/date code visible but text could not be extracted");
   } else {
     reasons.push("No serial/date code observed in provided images");
   }
 
-  // -------- BRAND-AWARE SERIAL FORMAT (STEP 3) --------
-  if (serialObserved && serialClear && inferredBrand) {
-    const mockSerialText = "UNKNOWN";
-
+  if (serialClear && inferredBrand) {
+    const serialText = normalizedSerial || "UNKNOWN";
     let issue = null;
+
     if (inferredBrand === "louis_vuitton") {
-      issue = checkLVSerialFormat(mockSerialText);
+      issue = checkLVSerialFormat(serialText);
     }
     if (inferredBrand === "gucci") {
-      issue = checkGucciSerialFormat(mockSerialText);
+      issue = checkGucciSerialFormat(serialText);
     }
 
-    if (issue) {
-      red_flags.push(issue);
-    } else {
+    if (issue) red_flags.push(issue);
+    else
       reasons.push(
-        `Serial format appears plausible for inferred brand (${inferredBrand.replace("_", " ")})`
+        `Serial format appears plausible for inferred brand (${inferredBrand.replace(
+          "_",
+          " "
+        )})`
       );
-    }
   }
 
-  // -------- VERDICT RULES --------
-  if (missing_photos.length > 0) {
+  if (missing_photos.length) {
     return {
       verdict: "Inconclusive",
       confidence: 30,
@@ -299,21 +330,11 @@ function buildCoreVerdict(files, labels = {}) {
 // =======================
 app.post("/verify", upload.array("images", 10), async (req, res) => {
   try {
-    if (!req.files || req.files.length === 0) {
-      return res.json({
-        verdict: "Inconclusive",
-        confidence: 0,
-        reasons: ["No images received"],
-        missing_photos: REQUIRED_VIEWS,
-        red_flags: []
-      });
-    }
-
     const labels = parseLabels(req);
-    const result = buildCoreVerdict(req.files, labels);
-    return res.json(result);
+    const result = await buildCoreVerdict(req.files || [], labels);
+    res.json(result);
   } catch {
-    return res.json({
+    res.json({
       verdict: "Inconclusive",
       confidence: 0,
       reasons: ["Server error during verification"],
@@ -321,29 +342,6 @@ app.post("/verify", upload.array("images", 10), async (req, res) => {
       red_flags: []
     });
   }
-});
-
-// =======================
-// Error handler
-// =======================
-app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    return res.json({
-      verdict: "Inconclusive",
-      confidence: 0,
-      reasons: [err.message],
-      missing_photos: [],
-      red_flags: []
-    });
-  }
-
-  return res.json({
-    verdict: "Inconclusive",
-    confidence: 0,
-    reasons: ["Invalid request"],
-    missing_photos: [],
-    red_flags: []
-  });
 });
 
 // =======================
