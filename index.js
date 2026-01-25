@@ -1,24 +1,21 @@
 // =======================
-// Imports (MUST be first)
+// Imports
 // =======================
 import express from "express";
 import multer from "multer";
 import cors from "cors";
 
 // =======================
-// App initialization
+// App init
 // =======================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// =======================
-// Middleware
-// =======================
 app.use(cors());
 app.use(express.json());
 
 // =======================
-// Multer configuration
+// Multer config
 // =======================
 const storage = multer.memoryStorage();
 
@@ -45,7 +42,7 @@ app.get("/", (req, res) => {
 });
 
 // ======================================================
-// CORE ENGINE (brand-agnostic, SAFE to live here)
+// CORE ENGINE CONSTANTS
 // ======================================================
 const REQUIRED_VIEWS = [
   "front",
@@ -60,6 +57,20 @@ const REQUIRED_VIEWS = [
   "stitching"
 ];
 
+const ALLOWED_VIEWS = new Set([
+  "front",
+  "back",
+  "side",
+  "bottom",
+  "top",
+  "interior",
+  "logo_stamp",
+  "hardware",
+  "handle_base",
+  "stitching",
+  "serial" // reserved for Step 2
+]);
+
 const VIEW_KEYWORDS = [
   { view: "front", keywords: ["front"] },
   { view: "back", keywords: ["back"] },
@@ -67,12 +78,15 @@ const VIEW_KEYWORDS = [
   { view: "bottom", keywords: ["bottom", "base"] },
   { view: "top", keywords: ["top"] },
   { view: "interior", keywords: ["interior", "inside", "lining"] },
-  { view: "logo_stamp", keywords: ["stamp", "logo", "heat", "serial", "label", "tag"] },
+  { view: "logo_stamp", keywords: ["stamp", "logo", "heat", "serial", "tag", "label"] },
   { view: "hardware", keywords: ["zip", "zipper", "pull", "lock", "clasp", "hardware"] },
   { view: "handle_base", keywords: ["handle", "strap", "base"] },
   { view: "stitching", keywords: ["stitch", "seam"] }
 ];
 
+// =======================
+// Helper functions
+// =======================
 function normalize(name = "") {
   return name.toLowerCase().replace(/\s+/g, "_");
 }
@@ -85,20 +99,45 @@ function classifyView(filename) {
   return null;
 }
 
-function buildCoreVerdict(files) {
+function parseLabels(req) {
+  if (!req.body || !req.body.labels) return {};
+
+  try {
+    const parsed =
+      typeof req.body.labels === "string"
+        ? JSON.parse(req.body.labels)
+        : req.body.labels;
+
+    if (typeof parsed !== "object" || Array.isArray(parsed)) return {};
+
+    const clean = {};
+    for (const [filename, view] of Object.entries(parsed)) {
+      if (ALLOWED_VIEWS.has(view)) {
+        clean[filename] = view;
+      }
+    }
+    return clean;
+  } catch {
+    return {};
+  }
+}
+
+function buildCoreVerdict(files, labels = {}) {
   const missing_photos = [];
   const red_flags = [];
   const reasons = [];
   const views = new Set();
 
   for (const f of files) {
-    if (f.size < 60000) {
+    if (f.size < 60_000) {
       red_flags.push(`Low-quality image: ${f.originalname}`);
       continue;
     }
 
-    const v = classifyView(f.originalname);
-    if (v) views.add(v);
+    const labeledView = labels[f.originalname];
+    const view = labeledView || classifyView(f.originalname);
+
+    if (view) views.add(view);
   }
 
   for (const req of REQUIRED_VIEWS) {
@@ -135,7 +174,7 @@ function buildCoreVerdict(files) {
 }
 
 // =======================
-// VERIFY ROUTE (AFTER app exists)
+// VERIFY ROUTE
 // =======================
 app.post("/verify", upload.array("images", 10), async (req, res) => {
   try {
@@ -149,10 +188,11 @@ app.post("/verify", upload.array("images", 10), async (req, res) => {
       });
     }
 
-    const result = buildCoreVerdict(req.files);
+    const labels = parseLabels(req);
+    const result = buildCoreVerdict(req.files, labels);
     return res.json(result);
 
-  } catch (err) {
+  } catch {
     return res.json({
       verdict: "Inconclusive",
       confidence: 0,
@@ -187,7 +227,7 @@ app.use((err, req, res, next) => {
 });
 
 // =======================
-// Start server (LAST)
+// Start server
 // =======================
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
