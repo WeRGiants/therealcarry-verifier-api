@@ -1,4 +1,52 @@
-// ---------- Core Engine Helpers (brand-agnostic) ----------
+// =======================
+// Imports (MUST be first)
+// =======================
+import express from "express";
+import multer from "multer";
+import cors from "cors";
+
+// =======================
+// App initialization
+// =======================
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// =======================
+// Middleware
+// =======================
+app.use(cors());
+app.use(express.json());
+
+// =======================
+// Multer configuration
+// =======================
+const storage = multer.memoryStorage();
+
+const upload = multer({
+  storage,
+  limits: {
+    files: 10,
+    fileSize: 10 * 1024 * 1024 // 10 MB
+  },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith("image/")) {
+      cb(new Error("Invalid file type"), false);
+    } else {
+      cb(null, true);
+    }
+  }
+});
+
+// =======================
+// Health check
+// =======================
+app.get("/", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+// ======================================================
+// CORE ENGINE (brand-agnostic, SAFE to live here)
+// ======================================================
 const REQUIRED_VIEWS = [
   "front",
   "back",
@@ -6,155 +54,141 @@ const REQUIRED_VIEWS = [
   "bottom",
   "top",
   "interior",
-  "logo_stamp",     // covers heat stamp / interior stamp / logo
-  "hardware",       // zipper pull / clasp / engraving
+  "logo_stamp",
+  "hardware",
   "handle_base",
-  "stitching",
+  "stitching"
 ];
 
-// Soft keyword map (conservative). If no match => unknown view.
 const VIEW_KEYWORDS = [
-  { view: "front", keywords: ["front", "main", "face"] },
-  { view: "back", keywords: ["back", "rear"] },
-  { view: "side", keywords: ["side", "profile"] },
+  { view: "front", keywords: ["front"] },
+  { view: "back", keywords: ["back"] },
+  { view: "side", keywords: ["side"] },
   { view: "bottom", keywords: ["bottom", "base"] },
-  { view: "top", keywords: ["top", "opening"] },
+  { view: "top", keywords: ["top"] },
   { view: "interior", keywords: ["interior", "inside", "lining"] },
-  { view: "logo_stamp", keywords: ["stamp", "heat", "logo", "madein", "made_in", "serial", "datecode", "date_code", "tag", "label"] },
-  { view: "hardware", keywords: ["zip", "zipper", "pull", "clasp", "lock", "chain", "hardware", "engraving", "buckle"] },
-  { view: "handle_base", keywords: ["handle", "base", "attachment", "strap", "d-ring", "dring", "ring"] },
-  { view: "stitching", keywords: ["stitch", "stitching", "seam"] },
+  { view: "logo_stamp", keywords: ["stamp", "logo", "heat", "serial", "label", "tag"] },
+  { view: "hardware", keywords: ["zip", "zipper", "pull", "lock", "clasp", "hardware"] },
+  { view: "handle_base", keywords: ["handle", "strap", "base"] },
+  { view: "stitching", keywords: ["stitch", "seam"] }
 ];
 
-function normalizeName(name = "") {
+function normalize(name = "") {
   return name.toLowerCase().replace(/\s+/g, "_");
 }
 
-function guessViewFromFilename(originalname = "") {
-  const n = normalizeName(originalname);
+function classifyView(filename) {
+  const n = normalize(filename);
   for (const { view, keywords } of VIEW_KEYWORDS) {
     if (keywords.some(k => n.includes(k))) return view;
   }
-  return null; // unknown/unclassified
+  return null;
 }
 
-function isLikelyTooSmall(file) {
-  // Heuristic: extremely small images are often unusable / thumbnails
-  // Tune if needed. Keeps system conservative.
-  return file.size < 60_000; // 60 KB
-}
-
-function hasSuspiciousMimetype(file) {
-  return !file.mimetype || !file.mimetype.startsWith("image/");
-}
-
-function buildCoreVerdict({ files }) {
-  const reasons = [];
-  const red_flags = [];
+function buildCoreVerdict(files) {
   const missing_photos = [];
-
-  // Basic validations
-  if (!files || files.length === 0) {
-    return {
-      verdict: "Inconclusive",
-      confidence: 0,
-      reasons: ["No images received"],
-      missing_photos: [...REQUIRED_VIEWS],
-      red_flags: [],
-    };
-  }
-
-  // Classify views conservatively (soft hints)
-  const viewBuckets = new Map(); // view -> file
-  const unclassified = [];
-
-  // detect duplicates by normalized name + size (cheap, deterministic)
-  const seen = new Set();
+  const red_flags = [];
+  const reasons = [];
+  const views = new Set();
 
   for (const f of files) {
-    const key = `${normalizeName(f.originalname)}:${f.size}`;
-    if (seen.has(key)) {
-      red_flags.push(`Duplicate upload detected: ${f.originalname} (${f.size} bytes)`);
-      continue;
-    }
-    seen.add(key);
-
-    if (hasSuspiciousMimetype(f)) {
-      red_flags.push(`Non-image mimetype: ${f.originalname} (${f.mimetype || "unknown"})`);
+    if (f.size < 60000) {
+      red_flags.push(`Low-quality image: ${f.originalname}`);
       continue;
     }
 
-    if (isLikelyTooSmall(f)) {
-      // Treat as unclear rather than hard fake
-      red_flags.push(`Low-information image (very small): ${f.originalname} (${f.size} bytes)`);
-      continue;
-    }
-
-    const guessed = guessViewFromFilename(f.originalname);
-    if (!guessed) {
-      unclassified.push(f.originalname);
-      continue;
-    }
-
-    // Only take first for each view to avoid overwriting
-    if (!viewBuckets.has(guessed)) viewBuckets.set(guessed, f.originalname);
+    const v = classifyView(f.originalname);
+    if (v) views.add(v);
   }
 
-  // Required view gating
-  for (const v of REQUIRED_VIEWS) {
-    if (!viewBuckets.has(v)) missing_photos.push(v);
+  for (const req of REQUIRED_VIEWS) {
+    if (!views.has(req)) missing_photos.push(req);
   }
 
-  if (unclassified.length > 0) {
-    reasons.push(`Unclassified images received: ${unclassified.slice(0, 5).join(", ")}${unclassified.length > 5 ? "…" : ""}`);
-  }
-
-  // Verdict rules
   if (missing_photos.length > 0) {
-    reasons.unshift("Missing or unclear required views");
     return {
       verdict: "Inconclusive",
-      confidence: Math.min(45, 20 + (REQUIRED_VIEWS.length - missing_photos.length) * 3 - red_flags.length * 5),
-      reasons,
+      confidence: 30,
+      reasons: ["Missing or unclear required views"],
       missing_photos,
-      red_flags,
+      red_flags
     };
   }
 
-  // If 3+ red flags across universal checks => likely not authentic (conservative)
   if (red_flags.length >= 3) {
-    reasons.unshift("Multiple technical inconsistencies detected");
     return {
       verdict: "Likely Not Authentic",
-      confidence: Math.min(70, 50 + red_flags.length * 5),
-      reasons,
+      confidence: 65,
+      reasons: ["Multiple technical inconsistencies detected"],
       missing_photos: [],
-      red_flags,
+      red_flags
     };
   }
 
-  // Clean + complete => likely authentic (still conservative)
   return {
     verdict: "Likely Authentic",
-    confidence: Math.min(85, 70 - red_flags.length * 5),
-    reasons: reasons.length ? reasons : ["All required views present; no universal quality red flags"],
+    confidence: 75,
+    reasons: ["All required views present; no universal red flags"],
     missing_photos: [],
-    red_flags,
+    red_flags
   };
 }
 
-// ---------- /verify route (replace your current handler) ----------
+// =======================
+// VERIFY ROUTE (AFTER app exists)
+// =======================
 app.post("/verify", upload.array("images", 10), async (req, res) => {
   try {
-    const result = buildCoreVerdict({ files: req.files || [] });
+    if (!req.files || req.files.length === 0) {
+      return res.json({
+        verdict: "Inconclusive",
+        confidence: 0,
+        reasons: ["No images received"],
+        missing_photos: REQUIRED_VIEWS,
+        red_flags: []
+      });
+    }
+
+    const result = buildCoreVerdict(req.files);
     return res.json(result);
+
   } catch (err) {
     return res.json({
       verdict: "Inconclusive",
       confidence: 0,
       reasons: ["Server error during verification"],
       missing_photos: [],
-      red_flags: [],
+      red_flags: []
     });
   }
+});
+
+// =======================
+// Error handler
+// =======================
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.json({
+      verdict: "Inconclusive",
+      confidence: 0,
+      reasons: [err.message],
+      missing_photos: [],
+      red_flags: []
+    });
+  }
+
+  return res.json({
+    verdict: "Inconclusive",
+    confidence: 0,
+    reasons: ["Invalid request"],
+    missing_photos: [],
+    red_flags: []
+  });
+});
+
+// =======================
+// Start server (LAST)
+// =======================
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
