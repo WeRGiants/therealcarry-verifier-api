@@ -6,39 +6,40 @@ import OpenAI from "openai";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// -----------------------
-// BASIC MIDDLEWARE
-// -----------------------
 app.use(cors());
 app.use(express.json());
 
-// -----------------------
-// OPENAI CLIENT (STEP 4)
-// -----------------------
+// =======================
+// OPENAI (STEP 4)
+// =======================
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// -----------------------
-// MULTER CONFIG
-// -----------------------
+// =======================
+// MULTER
+// =======================
 const upload = multer({
   limits: {
     files: 10,
-    fileSize: 10 * 1024 * 1024 // 10MB per file
+    fileSize: 10 * 1024 * 1024
   }
 });
 
-// -----------------------
-// ALLOWED VIEWS (STEP 1)
-// -----------------------
-const ALLOWED_VIEWS = new Set([
+// =======================
+// CONSTANTS
+// =======================
+const REQUIRED_VIEWS = [
   "front",
   "back",
   "side",
   "bottom",
   "top",
-  "interior",
+  "interior"
+];
+
+const ALLOWED_VIEWS = new Set([
+  ...REQUIRED_VIEWS,
   "logo_stamp",
   "hardware",
   "handle_base",
@@ -47,7 +48,7 @@ const ALLOWED_VIEWS = new Set([
 ]);
 
 // =======================
-// STEP 1: HELPERS
+// STEP 1 — VIEW HELPERS
 // =======================
 function parseLabels(req) {
   try {
@@ -58,9 +59,8 @@ function parseLabels(req) {
 
     if (typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const clean = {};
-
-    for (const [filename, view] of Object.entries(parsed)) {
-      if (ALLOWED_VIEWS.has(view)) clean[filename] = view;
+    for (const [file, view] of Object.entries(parsed)) {
+      if (ALLOWED_VIEWS.has(view)) clean[file] = view;
     }
     return clean;
   } catch {
@@ -68,15 +68,15 @@ function parseLabels(req) {
   }
 }
 
-function classifyView(filename = "") {
-  const n = filename.toLowerCase();
+function classifyView(name = "") {
+  const n = name.toLowerCase();
   if (n.includes("front")) return "front";
   if (n.includes("back")) return "back";
   if (n.includes("side")) return "side";
   if (n.includes("bottom")) return "bottom";
   if (n.includes("top")) return "top";
   if (n.includes("interior")) return "interior";
-  if (n.includes("heat") || n.includes("stamp")) return "logo_stamp";
+  if (n.includes("stamp") || n.includes("heat")) return "logo_stamp";
   if (n.includes("zip") || n.includes("hardware")) return "hardware";
   if (n.includes("handle")) return "handle_base";
   if (n.includes("stitch")) return "stitching";
@@ -85,7 +85,7 @@ function classifyView(filename = "") {
 }
 
 // =======================
-// STEP 2: SERIAL HELPERS
+// STEP 2 — SERIAL VISIBILITY
 // =======================
 function isLikelySerialView(view) {
   return view === "serial" || view === "logo_stamp";
@@ -98,33 +98,29 @@ function assessSerialImage(file) {
 }
 
 // =======================
-// STEP 3: BRAND INFERENCE
+// STEP 3 — BRAND INFERENCE
 // =======================
-function inferBrandFromFilename(filename = "") {
-  const n = filename.toLowerCase();
-  if (n.includes("lv") || n.includes("louis")) return "louis_vuitton";
-  if (n.includes("gucci")) return "gucci";
-  if (n.includes("chanel")) return "chanel";
+function inferBrand(files) {
+  const names = files.map(f => f.originalname.toLowerCase()).join(" ");
+  if (names.includes("lv") || names.includes("louis")) return "louis_vuitton";
+  if (names.includes("gucci")) return "gucci";
+  if (names.includes("chanel")) return "chanel";
   return "unknown";
 }
 
 // =======================
-// STEP 4: OCR
+// STEP 4 — OCR
 // =======================
 async function extractSerialTextFromImage(buffer) {
   try {
-    const response = await openai.chat.completions.create({
+    const r = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        {
-          role: "system",
-          content:
-            "You extract serial or date-code text from handbag images. Return ONLY the text you see."
-        },
+        { role: "system", content: "Extract serial/date code text only." },
         {
           role: "user",
           content: [
-            { type: "text", text: "Extract any serial or date code text visible." },
+            { type: "text", text: "Extract serial/date code text." },
             {
               type: "image_url",
               image_url: {
@@ -136,15 +132,14 @@ async function extractSerialTextFromImage(buffer) {
       ],
       max_tokens: 50
     });
-
-    return response.choices[0]?.message?.content?.trim() || null;
+    return r.choices[0]?.message?.content?.trim() || null;
   } catch {
     return null;
   }
 }
 
 // =======================
-// STEP 5: CRAFTSMANSHIP
+// STEP 5 — CRAFTSMANSHIP
 // =======================
 function assessImageQuality(file) {
   if (!file) return "missing";
@@ -156,10 +151,8 @@ function assessImageQuality(file) {
 function assessFileSetConsistency(files) {
   const sizes = files.map(f => f.size);
   if (sizes.length < 3) return null;
-
   const max = Math.max(...sizes);
   const min = Math.min(...sizes);
-
   if (min > 0 && max / min > 8) {
     return "Inconsistent image quality across photo set";
   }
@@ -167,70 +160,90 @@ function assessFileSetConsistency(files) {
 }
 
 // =======================
-// CORE VERIFICATION LOGIC
+// STEP 6 — MODEL RULES
+// =======================
+function inferLVModel(files) {
+  const names = files.map(f => f.originalname.toLowerCase()).join(" ");
+  if (names.includes("neverfull")) return "neverfull";
+  if (names.includes("speedy")) return "speedy";
+  return "unknown";
+}
+
+function applyLVModelRules({
+  model,
+  viewsSeen,
+  stitchingQuality,
+  hardwareQuality,
+  reasons,
+  red_flags
+}) {
+  if (model === "neverfull") {
+    if (!viewsSeen.has("handle_base")) {
+      red_flags.push("Neverfull requires clear handle base construction detail");
+    } else if (stitchingQuality === "good") {
+      reasons.push("Handle base stitching consistent with Neverfull norms");
+    }
+  }
+
+  if (model === "speedy") {
+    if (!viewsSeen.has("hardware")) {
+      red_flags.push("Speedy typically includes visible hardware engraving");
+    } else if (hardwareQuality === "good") {
+      reasons.push("Hardware finish consistent with Speedy norms");
+    }
+  }
+}
+
+// =======================
+// CORE ENGINE
 // =======================
 async function buildCoreVerdict(files, labels) {
   const reasons = [];
   const red_flags = [];
   const missing_photos = [];
-
   const viewsSeen = new Set();
-  let serialFile = null;
 
+  let serialFile = null;
   let stitchingQuality = null;
   let hardwareQuality = null;
   let handleBaseQuality = null;
 
-  for (const file of files) {
-    const view = labels[file.originalname] || classifyView(file.originalname);
+  for (const f of files) {
+    const view = labels[f.originalname] || classifyView(f.originalname);
     if (!view) continue;
 
     viewsSeen.add(view);
 
-    if (isLikelySerialView(view)) serialFile = file;
-
-    const quality = assessImageQuality(file);
+    const quality = assessImageQuality(f);
     if (view === "stitching") stitchingQuality = quality;
     if (view === "hardware") hardwareQuality = quality;
     if (view === "handle_base") handleBaseQuality = quality;
+
+    if (isLikelySerialView(view)) serialFile = f;
   }
 
-  // Required views
-  ["front", "back", "side", "bottom", "top", "interior"].forEach(v => {
+  REQUIRED_VIEWS.forEach(v => {
     if (!viewsSeen.has(v)) missing_photos.push(v);
   });
 
-  // Serial logic
   if (serialFile) {
-    const serialCheck = assessSerialImage(serialFile);
-    if (serialCheck.present) {
-      if (serialCheck.clear) {
-        const text = await extractSerialTextFromImage(serialFile.buffer);
-        if (text) {
-          reasons.push("Serial/date code text extracted from image");
-          reasons.push("Serial/date code observed and appears readable");
-        } else {
-          reasons.push("Serial/date code visible but text could not be extracted");
-        }
-      } else {
-        reasons.push("Serial/date code visible but unclear");
-      }
+    const s = assessSerialImage(serialFile);
+    if (s.present && s.clear) {
+      const text = await extractSerialTextFromImage(serialFile.buffer);
+      if (text) reasons.push("Serial/date code text extracted from image");
+      else reasons.push("Serial/date code visible but text could not be extracted");
     }
   }
 
-  // Craftsmanship
-  if (stitchingQuality === "poor") {
-    red_flags.push("Stitching detail image too low quality to assess consistency");
-  }
-  if (hardwareQuality === "poor") {
-    red_flags.push("Hardware image quality insufficient to assess finish");
-  }
-  if (handleBaseQuality === "poor") {
+  if (stitchingQuality === "poor")
+    red_flags.push("Stitching detail image too low quality");
+  if (hardwareQuality === "poor")
+    red_flags.push("Hardware image quality insufficient");
+  if (handleBaseQuality === "poor")
     red_flags.push("Handle base construction insufficiently visible");
-  }
 
-  const coherence = assessFileSetConsistency(files);
-  if (coherence) red_flags.push(coherence);
+  const consistency = assessFileSetConsistency(files);
+  if (consistency) red_flags.push(consistency);
 
   if (
     stitchingQuality === "good" &&
@@ -240,11 +253,27 @@ async function buildCoreVerdict(files, labels) {
     reasons.push("Overall craftsmanship details appear consistent with quality construction");
   }
 
-  if (missing_photos.length > 0) {
+  const brand = inferBrand(files);
+  if (brand === "louis_vuitton") {
+    const model = inferLVModel(files);
+    if (model !== "unknown") {
+      applyLVModelRules({
+        model,
+        viewsSeen,
+        stitchingQuality,
+        hardwareQuality,
+        reasons,
+        red_flags
+      });
+      reasons.push(`Construction evaluated against ${model} model norms`);
+    }
+  }
+
+  if (missing_photos.length) {
     return {
       verdict: "Inconclusive",
       confidence: 30,
-      reasons: reasons.length ? reasons : ["Missing or unclear required views"],
+      reasons: reasons.length ? reasons : ["Missing required views"],
       missing_photos,
       red_flags
     };
@@ -255,7 +284,7 @@ async function buildCoreVerdict(files, labels) {
       verdict: "Likely Not Authentic",
       confidence: 85,
       reasons,
-      missing_photos,
+      missing_photos: [],
       red_flags
     };
   }
@@ -263,32 +292,22 @@ async function buildCoreVerdict(files, labels) {
   return {
     verdict: "Likely Authentic",
     confidence: 75,
-    reasons: reasons.length ? reasons : ["All required views present; no universal red flags"],
-    missing_photos,
+    reasons,
+    missing_photos: [],
     red_flags
   };
 }
 
 // =======================
-// ROUTE
+// ROUTES
 // =======================
 app.post("/verify", upload.array("images", 10), async (req, res) => {
   try {
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({
-        verdict: "Inconclusive",
-        confidence: 0,
-        reasons: ["No images received"],
-        missing_photos: [],
-        red_flags: []
-      });
-    }
-
     const labels = parseLabels(req);
-    const result = await buildCoreVerdict(req.files, labels);
+    const result = await buildCoreVerdict(req.files || [], labels);
     res.json(result);
-  } catch (err) {
-    res.status(500).json({
+  } catch {
+    res.json({
       verdict: "Inconclusive",
       confidence: 0,
       reasons: ["Server error during verification"],
@@ -298,15 +317,10 @@ app.post("/verify", upload.array("images", 10), async (req, res) => {
   }
 });
 
-// =======================
-// HEALTH CHECK
-// =======================
-app.get("/", (req, res) => {
-  res.json({ status: "ok" });
-});
+app.get("/", (_, res) => res.json({ status: "ok" }));
 
 // =======================
-// START SERVER
+// START
 // =======================
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
