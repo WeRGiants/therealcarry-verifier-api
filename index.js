@@ -148,12 +148,13 @@ function assessImageQuality(file) {
   return "good";
 }
 
-function assessFileSetConsistency(files) {
+function 
+assessFileSetConsistency(files) {
   const sizes = files.map(f => f.size);
   if (sizes.length < 3) return null;
   const max = Math.max(...sizes);
   const min = Math.min(...sizes);
-  if (min > 0 && max / min > 8) {
+  if (min > 0 && max / min >4) {
     return "Inconsistent image quality across photo set";
   }
   return null;
